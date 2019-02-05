@@ -1,0 +1,162 @@
+#!/usr/bin/env python
+
+# The output format (one line per test):
+# description remote_host protocol(TCP) bw_to(Mbits/s) retr_to bw_from(Mbits/s) retr_from duration(s) last_run(int)
+# description remote_host protocol(UDP) bw_to(Mbits/s) jitter_to(ms) pkts_to pkt_lost_to prct_lost_to(%) bw_from(Mbits/s) jitter_from(ms) pkts_from pkt_lost_from prct_lost_from(%) duration(s) last_run(int)
+
+import os,sys,time,signal
+from collections import defaultdict
+from multiprocessing import Process, Pipe
+
+print '<<<iperf_jobs>>>'
+
+try:
+   import iperf3
+except ImportError, e:
+   print ("error: failed to locate iperf3 lib, %s" % str(e))
+   sys.exit();
+
+MK_CONFDIR = os.getenv("MK_CONFDIR") or "/etc/check_mk"
+config_file = MK_CONFDIR + '/iperf_jobs.cfg'
+
+
+servers = {}
+if os.path.exists(config_file):
+    execfile(config_file)
+    if type(servers) == dict:
+        servers = [ servers ]
+else:
+   print ("error: iperf_jobs.cfg not found")
+   sys.exit()    
+
+if servers is None or not servers:
+   print ("error: iperf_jobs.cfg does not have any servers")
+   sys.exit()
+
+try:
+   if global_set:
+	pass
+except:
+   print ("error: iperf_jobs.cfg does not have global_set section")
+   sys.exit() 
+
+glob_timeout = 15
+if 'timeout' in global_set:
+   glob_timeout = global_set['timeout']
+
+glob_timeout = glob_timeout + 3
+
+
+
+def formatter (desc, outp):
+
+   if isinstance(outp,list):
+     if outp[0].protocol == 'TCP': 
+	print ("%s %s TCP %0.2f %d %0.2f %d %d %d") % (desc,\
+	   outp[0].remote_host,outp[0].sent_Mbps,outp[0].retransmits,outp[1].sent_Mbps,outp[1].retransmits,outp[0].duration,outp[0].timesecs)
+     elif outp[0].protocol == 'UDP': 
+	print ("%s %s UDP %0.2f %d %d %d %0.2f %0.2f %d %d %d %0.2f %d %d") % (desc,outp[0].remote_host,outp[0].Mbps,outp[0].jitter_ms,outp[0].packets,outp[0].lost_packets,\
+	     outp[0].lost_percent,outp[1].Mbps,outp[1].jitter_ms,outp[1].packets,outp[1].lost_packets,outp[1].lost_percent,outp[1].seconds,outp[0].timesecs) 
+   else:
+     if desc:
+	print ("%s error: %s") % (desc, outp)
+     else:
+	print (outp)
+
+
+
+def worker (out_q,server):
+ result = [] 
+
+ for direct in range(2):
+  client = iperf3.Client() 
+  client.reverse = direct
+  client.json_output = True 
+
+  try:
+   client.server_hostname = server['server']
+   description = server['description'] 
+   if 'duration' in server:
+     client.duration = server['duration']
+   if 'port' in server: 
+     client.port = server['port']
+   if 'protocol' in server: 
+     client.protocol = server['protocol']
+   if 'bandwidth' in server: 
+     client.bandwidth = server['bandwidth']
+   if 'blksize' in server: 
+     client.blksize = server['blksize']
+   if 'num_streams' in server: 
+     client.num_streams = server['num_streams']
+   if 'zerocopy' in server: 
+     client.zerocopy = server['zerocopy']
+  except:
+   er = "config parameter problem for server" 
+   out_q.send(er)
+   break	 
+
+  try:
+ 
+   x = client.run()
+   del client
+   if x.error:
+    er = x.error
+    out_q.send(er)
+    break
+   result.insert(direct,x)
+  except:
+   out_q.send("exception in iperf3 lib, could be a compatibility problem")
+   break
+ if result:
+  out_q.send(result)
+ time.sleep(1) 
+
+
+if __name__ == '__main__':
+
+  children = defaultdict(lambda: defaultdict(dict)) 
+  for server in servers:
+	if not 'server' in server or not server['server']:
+	   if 'description' in server and server['description']:
+     	      formatter(server['description'],"config parameter 'server' must be defined (ip or hostname)")
+     	   continue
+   	if not 'description' in server:
+     	   server['description'] = server['server']
+	par_pipe, child_pipe = Pipe()
+	children[server['description']]['pipe'] = par_pipe
+	p = Process(target=worker, args=(child_pipe, server)) 
+	p.start()
+	children[server['description']]['proc'] = p
+	children[server['description']]['grace_term'] = 0
+
+  poll_start = time.time()
+  children_del = []
+ 
+  while 1 == 1:
+   live_procs = 0
+   for i in children_del:
+	del children[i]
+   children_del = [] 
+   for srv in children:
+    if children[srv]['proc'].is_alive():
+	live_procs+= 1
+	if children[srv]['pipe'].poll(0.5):
+	   outp = children[srv]['pipe'].recv()
+	   formatter(srv, outp)
+	   children[srv]['proc'].join
+	else:
+	   if time.time() - poll_start > glob_timeout + 3:
+		if children[srv]['grace_term'] == 1:
+			os.kill(children[srv]['proc'].pid, signal.SIGTERM)
+		else:
+			children[srv]['proc'].join
+			children[srv]['proc'].terminate
+			children[srv]['grace_term'] = 1
+    else:
+	if children[srv]['grace_term'] == 1:
+	   outp = "process timed out after %d sec, possibly failed to connect" % (glob_timeout)
+	   formatter(srv, outp)
+	   children_del.append(srv)
+   if live_procs == 0:
+	break
+	    

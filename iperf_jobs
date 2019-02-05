@@ -1,0 +1,115 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+
+
+# <<<iperf_jobs>>>
+# description remote_host protocol(TCP) bw_to(Mbits/s) retr_to bw_from(Mbits/s) retr_from duration(s) last_run(int)
+# description remote_host protocol(UDP) bw_to(Mbits/s) jitter_to(ms) pkts_to pkt_lost_to prct_lost_to(%) bw_from(Mbits/s) jitter_from(ms) pkts_from pkt_lost_from prct_lost_from(%) duration(s) last_run(int)
+
+timezone = -5 * 60 * 60 
+
+iperf_jobs_default_levels = {}
+
+def inventory_iperf(info):
+    inventory = []
+    for line in info:
+	if not 'error:' in line and len(line) > 7:
+	    inventory.append((line[0], 'iperf_jobs_default_levels'))
+    return inventory
+
+
+def check_iperf(item, params, info):
+    if not params:
+        params = {}
+
+    for line in info:
+	if line[0] == 'error:':
+	    return (3, ' '.join(line))
+	if line[0] == item:
+	    if 'error:' in line:
+	        return (3, ' '.join(line[1:]))
+	    if len(line) == 9:
+		line_format = [
+			('host','',line[1]),('prot','',line[2]),
+			('bw_to','Mbps',line[3]),('retr_to','num of',line[4]),
+			('bw_from','Mbps',line[5]),('retr_from','num of',line[6]),
+			('duration','sec',line[7]),('last_run','',line[8]),
+		]
+	    elif len(line) == 15:
+		line_format = [
+			('host','',line[1]),('prot','',line[2]),
+                        ('bw_to','Mbps',line[3]),('jitter_to','ms',line[4]),('pkts_to','num of',line[5]),('pkt_lost_to','num of',line[6]),('prct_lost_to','%',line[7]),
+                       	('bw_from','Mbps',line[8]),('jitter_from','ms',line[9]),('pkts_from','num of',line[10]),('pkt_lost_from','num of',line[11]),('prct_lost_from','%',line[12]), 
+			('duration','sec',line[13]),('last_run','',line[14]),                        
+                ]
+	    else:
+		continue
+
+	    output   = []
+     	    perfdata = []
+	    state = 0
+
+	    for key, uom, val in line_format:
+		if key in ['pkts_to','pkts_from']:
+		## skip the attributes in the output
+			continue
+		
+		warn, crit = params.get(key, (None, None))
+            	error_label = ""
+            	if warn and crit:
+                	levels = "(Warn/Crit at %s/%s%s)" % (warn, crit, str(uom) )
+			if key in ['bw_to','bw_from']:
+                	   if savefloat(val) <= crit:
+                    		state = 2
+                    		error_label += levels + "(!!)"
+                	   elif savefloat(val) <= warn:
+                    		state = max(state, 1)
+                    		error_label += levels +"(!)"
+			else:
+			   if savefloat(val) >= crit:
+                                state = 2
+                                error_label += levels + "(!!)"
+                           elif savefloat(val) >= warn:
+                                state = max(state, 1)
+                                error_label += levels +"(!)"
+		if key == 'prot':
+			output.append('%s' % val)
+		elif key == 'last_run':
+			dst_chk = time.localtime()
+			dst = 0
+			if dst_chk.tm_isdst == 1: dst = -1 * 60 * 60
+			val = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(val) + timezone + dst))
+			output.append('%s: %s' % (key.capitalize(), val))
+		elif error_label=="" and key in ['bw_to','bw_from','jitter_to','jitter_from','duration']:
+			output.append('%s: %s %s' % (key.capitalize(), val, uom))
+		elif error_label=="" and key in ['prct_lost_to','prct_lost_from']:
+                        output.append('%s: %s%s' % (key.capitalize(), val, uom))
+		else:
+			output.append('%s: %s %s' % (key.capitalize(), val, error_label))
+
+		if key in ['bw_to','bw_from']:
+			if warn and crit:
+				warn = warn * 1000000; crit = crit * 1000000
+			perfdata.append((key, savefloat(val) * 1000000, warn, crit))
+		elif key in ['jitter_to','jitter_from']:
+			if warn and crit:
+                                warn = warn / 1000; crit = crit / 1000
+                        perfdata.append((key, savefloat(val) / 1000, warn, crit))
+		elif key in ['retr_to','retr_from','pkt_lost_to','pkt_lost_from']:
+                        perfdata.append((key, val, warn, crit))
+		elif key in ['prct_lost_to','prct_lost_from']:
+			perfdata.append((key, val, warn, crit,0,100))
+
+	    return state, '%s' % ', '.join(output), perfdata	
+
+    return (3, 'Service %s could not be found' % item)	    	     
+
+
+check_info["iperf_jobs"] = {
+    'check_function'		: check_iperf,
+    'inventory_function'	: inventory_iperf,
+    'service_description'	: 'Iperf %s',
+    'group'			: "iperf_jobs",
+    'has_perfdata'		: True,
+}
+
