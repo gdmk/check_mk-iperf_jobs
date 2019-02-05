@@ -10,3 +10,5 @@ This check measures and checks Iperf3 based network tests. This check relies on 
  the python wrapper for iperf3 from https://iperf3-python.readthedocs.io/en/latest/ (can be installed via PIP)
  
  Should work with Iperf3 3.(1-6), however this mostly depends on compatibility with API wrapper above
+ 
+ Will work with Check_MK version 1.2.8 (will use PNP4Nagios generic template) to 1.5 (will use new metrics def for either PNP4Nagios or HTML5 based for CEE edition), CMC or Nagios
